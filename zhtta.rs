@@ -21,9 +21,12 @@ use std::io::net::ip::{SocketAddr};
 use std::{os, str, libc, from_str};
 use std::path::Path;
 use std::hashmap::HashMap;
+use gash::*;
 
 use extra::getopts;
 use extra::arc::MutexArc;
+
+mod gash;
 
 static SERVER_NAME : &'static str = "Zhtta Version 0.5";
 
@@ -187,11 +190,31 @@ impl WebServer {
         stream.write(HTTP_OK.as_bytes());
         stream.write(file_reader.read_to_end());
     }
+
+    fn respond_with_dynamic_file(stream: Option<std::io::net::tcp::TcpStream>, path: &Path) {
+	let mut stream = stream;
+        let mut file_reader = File::open(path).expect("Invalid file!");
+        stream.write(HTTP_OK.as_bytes());
+	let file_bytes = file_reader.read_to_end();
+	let file_string = str::from_utf8(file_bytes);
+	let mut output_string = file_string.to_owned();
+	for line in file_string.lines() {
+		if line.contains("<!--#") {
+			let ssi = line.slice(line.find_str("<!--#").unwrap(), line.find_str("-->").unwrap()+3);
+			if (ssi.contains("#exec cmd=")) {
+				let command = ssi.slice(ssi.find('"').unwrap()+1, ssi.rfind('"').unwrap());
+				let output = gash::run_cmdline(command);
+				output_string = output_string.replace(ssi, output);
+			}
+		}
+	}
+        stream.write_str(output_string);
+    }
     
     // TODO: Server-side gashing.
     fn respond_with_dynamic_page(stream: Option<std::io::net::tcp::TcpStream>, path: &Path) {
         // for now, just serve as static file
-        WebServer::respond_with_static_file(stream, path);
+        WebServer::respond_with_dynamic_file(stream, path);
     }
     
     // TODO: Smarter Scheduling.
