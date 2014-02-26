@@ -25,6 +25,7 @@ use gash::*;
 
 use extra::getopts;
 use extra::arc::MutexArc;
+use extra::arc::RWArc;
 
 mod gash;
 
@@ -44,7 +45,7 @@ static COUNTER_STYLE : &'static str = "<doctype !html><html><head><title>Hello, 
              </style></head>
              <body>";
 
-static mut visitor_count : uint = 0;
+//static visitor_count: RWArc<int> = RWArc::new(0);            
 
 struct HTTP_Request {
     // Use peer_name as the key to access TcpStream in hashmap. 
@@ -60,6 +61,7 @@ struct WebServer {
     port: uint,
     www_dir_path: ~Path,
     
+    visitor_count : RWArc<int>,// = RWArc::new(0),
     request_queue_arc: MutexArc<~[HTTP_Request]>,
     stream_map_arc: MutexArc<HashMap<~str, Option<std::io::net::tcp::TcpStream>>>,
     
@@ -72,15 +74,14 @@ impl WebServer {
         let (notify_port, shared_notify_chan) = SharedChan::new();
         let www_dir_path = ~Path::new(www_dir);
         os::change_dir(www_dir_path.clone());
-
+	
         WebServer {
             ip: ip.to_owned(),
             port: port,
             www_dir_path: www_dir_path,
-                        
             request_queue_arc: MutexArc::new(~[]),
             stream_map_arc: MutexArc::new(HashMap::new()),
-            
+            visitor_count : RWArc::new(0),
             notify_port: notify_port,
             shared_notify_chan: shared_notify_chan,        
         }
@@ -99,21 +100,23 @@ impl WebServer {
         let shared_notify_chan = self.shared_notify_chan.clone();
         let stream_map_arc = self.stream_map_arc.clone();
                 
+        let vis_count = self.visitor_count.clone(); 
         spawn(proc() {
             let mut acceptor = net::tcp::TcpListener::bind(addr).listen();
             println!("{:s} listening on {:s} (serving from: {:s}).", 
                      SERVER_NAME, addr.to_str(), www_dir_path_str);
             
+            let vis_count = vis_count.clone(); 
             for stream in acceptor.incoming() {
                 let (queue_port, queue_chan) = Chan::new();
                 queue_chan.send(request_queue_arc.clone());
                 
                 let notify_chan = shared_notify_chan.clone();
                 let stream_map_arc = stream_map_arc.clone();
-                
+               	let vis_count = vis_count.clone(); 
                 // Spawn a task to handle the connection.
                 spawn(proc() {
-                    unsafe { visitor_count += 1; } // TODO: Fix unsafe counter
+                    vis_count.write(|current| {*current +=1;}); 
                     let request_queue_arc = queue_port.recv();
                   
                     let mut stream = stream;
@@ -142,7 +145,7 @@ impl WebServer {
                              
                         if path_str == ~"./" {
                             debug!("===== Counter Page request =====");
-                            WebServer::respond_with_counter_page(stream);
+                            WebServer::respond_with_counter_page(vis_count.clone(), stream);
                             debug!("=====Terminated connection from [{:s}].=====", peer_name);
                         } else if !path_obj.exists() || path_obj.is_dir() {
                             debug!("===== Error page request =====");
@@ -171,13 +174,15 @@ impl WebServer {
     }
 
     // TODO: Safe visitor counter.
-    fn respond_with_counter_page(stream: Option<std::io::net::tcp::TcpStream>) {
+    fn respond_with_counter_page(visitor_count: RWArc<int>, stream: Option<std::io::net::tcp::TcpStream>) {
         let mut stream = stream;
+	let mut temp = 0;
+	visitor_count.read(|count| {temp = *count;});
         let response: ~str = 
             format!("{:s}{:s}<h1>Greetings, Krusty!</h1>
-                     <h2>Visitor count: {:u}</h2></body></html>\r\n", 
+                     <h2>Visitor count: {:?}</h2></body></html>\r\n", 
                     HTTP_OK, COUNTER_STYLE, 
-                    unsafe { visitor_count } );
+                    temp);
         debug!("Responding to counter request");
         stream.write(response.as_bytes());
     }
