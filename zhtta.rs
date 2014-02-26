@@ -173,7 +173,7 @@ impl WebServer {
         stream.write(msg.as_bytes());
     }
 
-    // TODO: Safe visitor counter.
+    // Safe visitor counter.
     fn respond_with_counter_page(visitor_count: RWArc<int>, stream: Option<std::io::net::tcp::TcpStream>) {
         let mut stream = stream;
 	let mut temp = 0;
