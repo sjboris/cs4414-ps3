@@ -246,7 +246,15 @@ impl WebServer {
         req_queue_arc.access(|local_req_queue| {
             debug!("Got queue mutex lock.");
             let req: HTTP_Request = req_port.recv();
-            local_req_queue.push(req);
+            //look at IP address, if prioritized, then unshift, otherwise, push
+		let peer_vec = peer_name.split('.').to_owned_vec();
+		let first_two = peer_vec[0] + "." + peer_vec[1];
+		if (str::eq(&first_two, &~"128.143") || str::eq(&first_two, &~"137.54")) {
+			local_req_queue.unshift(req);
+		}
+		else {
+			local_req_queue.push(req);
+		}
             debug!("A new request enqueued, now the length of queue is {:u}.", local_req_queue.len());
         });
         
