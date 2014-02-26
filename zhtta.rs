@@ -20,6 +20,7 @@ use std::io::*;
 use std::io::net::ip::{SocketAddr};
 use std::{os, str, libc, from_str};
 use std::path::Path;
+use std::num::ToPrimitive;
 use std::hashmap::HashMap;
 use gash::*;
 
@@ -83,7 +84,7 @@ impl WebServer {
             request_queue_arc: MutexArc::new(~[]),
             stream_map_arc: MutexArc::new(HashMap::new()),
             visitor_count : RWArc::new(0),
-	    task_count : RWArc::new(4),
+	    task_count : RWArc::new(12),
             notify_port: notify_port,
             shared_notify_chan: shared_notify_chan,        
         }
@@ -167,6 +168,11 @@ impl WebServer {
         });
     }
 
+    fn get_file_size(path: &Path) -> uint {
+	let st = path.stat();
+	st.size.to_uint().unwrap()
+    }
+
     fn respond_with_error_page(stream: Option<std::io::net::tcp::TcpStream>, path: &Path) {
         let mut stream = stream;
         let msg: ~str = format!("Cannot open: {:s}", path.as_str().expect("invalid path").to_owned());
@@ -195,6 +201,13 @@ impl WebServer {
         let mut stream = stream;
         let mut file_reader = File::open(path).expect("Invalid file!");
         stream.write(HTTP_OK.as_bytes());
+	let size: uint = WebServer::get_file_size(path);
+	let mut read: uint = 0;
+	let blocksize: uint = 10240;
+	while blocksize < (size - read) {
+		stream.write(file_reader.read_bytes(blocksize));
+		read = read + blocksize;
+	}
         stream.write(file_reader.read_to_end());
     }
 
@@ -251,6 +264,7 @@ impl WebServer {
             //look at IP address, if prioritized, then unshift, otherwise, push
 		let peer_vec = peer_name.split('.').to_owned_vec();
 		let first_two = peer_vec[0] + "." + peer_vec[1];
+		//println!("{:?}", WebServer::get_file_size(path_obj));
 		if (str::eq(&first_two, &~"128.143") || str::eq(&first_two, &~"137.54")) {
 			local_req_queue.unshift(req);
 		}
@@ -307,12 +321,13 @@ impl WebServer {
 	    if (temp > 0) {
 		let task_count_2 = task_count_get.clone();
 		spawn(proc() {
-			task_count_2.write(|count| {*count -= 1; println!("{:?}", *count);});
+			//println!("{:?}", *count); <- put that in write statement below to see count value
+			task_count_2.write(|count| {*count -= 1;});
 			let stream = stream_port.recv();
 			WebServer::respond_with_static_file(stream, request.path);
 			// Close stream automatically.
 		        debug!("=====Terminated connection from [{:s}].=====", request.peer_name);
-			task_count_2.write(|count| {*count += 1; println!("{:?}", *count);});
+			task_count_2.write(|count| {*count += 1;});
                 });
 	    }
             
