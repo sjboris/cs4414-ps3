@@ -62,6 +62,7 @@ struct WebServer {
     www_dir_path: ~Path,
     
     visitor_count : RWArc<int>,// = RWArc::new(0),
+    task_count : RWArc<int>,
     request_queue_arc: MutexArc<~[HTTP_Request]>,
     stream_map_arc: MutexArc<HashMap<~str, Option<std::io::net::tcp::TcpStream>>>,
     
@@ -82,6 +83,7 @@ impl WebServer {
             request_queue_arc: MutexArc::new(~[]),
             stream_map_arc: MutexArc::new(HashMap::new()),
             visitor_count : RWArc::new(0),
+	    task_count : RWArc::new(4),
             notify_port: notify_port,
             shared_notify_chan: shared_notify_chan,        
         }
@@ -267,7 +269,8 @@ impl WebServer {
     fn dequeue_static_file_request(&mut self) {
         let req_queue_get = self.request_queue_arc.clone();
         let stream_map_get = self.stream_map_arc.clone();
-        
+        let task_count_get = self.task_count.clone();
+
         // Port<> cannot be sent to another task. So we have to make this task as the main task that can access self.notify_port.
         
         let (request_port, request_chan) = Chan::new();
@@ -297,10 +300,22 @@ impl WebServer {
             }
             
             // TODO: Spawning more tasks to respond the dequeued requests concurrently. You may need a semophore to control the concurrency.
-            let stream = stream_port.recv();
-            WebServer::respond_with_static_file(stream, request.path);
-            // Close stream automatically.
-            debug!("=====Terminated connection from [{:s}].=====", request.peer_name);
+	    let mut temp = 0;
+  	    task_count_get.read(|count| {temp = *count;});
+            //let stream = stream_port.recv();
+            //WebServer::respond_with_static_file(stream, request.path);
+	    if (temp > 0) {
+		let task_count_2 = task_count_get.clone();
+		spawn(proc() {
+			task_count_2.write(|count| {*count -= 1; println!("{:?}", *count);});
+			let stream = stream_port.recv();
+			WebServer::respond_with_static_file(stream, request.path);
+			// Close stream automatically.
+		        debug!("=====Terminated connection from [{:s}].=====", request.peer_name);
+			task_count_2.write(|count| {*count += 1; println!("{:?}", *count);});
+                });
+	    }
+            
         }
     }
     
