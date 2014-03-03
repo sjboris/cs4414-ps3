@@ -27,6 +27,7 @@ use gash::*;
 use extra::getopts;
 use extra::arc::MutexArc;
 use extra::arc::RWArc;
+use extra::lru_cache::LruCache;
 
 mod gash;
 
@@ -66,6 +67,8 @@ struct WebServer {
     task_count : RWArc<int>,
     request_queue_arc: MutexArc<~[HTTP_Request]>,
     stream_map_arc: MutexArc<HashMap<~str, Option<std::io::net::tcp::TcpStream>>>,
+    cache_map_arc: MutexArc<LruCache<~str, ~[u8]>>,
+    cache: LruCache<~str, ~[u8]>,
     
     notify_port: Port<()>,
     shared_notify_chan: SharedChan<()>,
@@ -84,7 +87,9 @@ impl WebServer {
             request_queue_arc: MutexArc::new(~[]),
             stream_map_arc: MutexArc::new(HashMap::new()),
             visitor_count : RWArc::new(0),
-	    task_count : RWArc::new(12),
+	    task_count : RWArc::new(16),
+	    cache_map_arc: MutexArc::new(LruCache::new(5)),
+	    cache: LruCache::new(5),
             notify_port: notify_port,
             shared_notify_chan: shared_notify_chan,        
         }
@@ -197,18 +202,43 @@ impl WebServer {
     
     // TODO: Streaming file.
     // TODO: Application-layer file caching.
-    fn respond_with_static_file(stream: Option<std::io::net::tcp::TcpStream>, path: &Path) {
+    fn respond_with_static_file(stream: Option<std::io::net::tcp::TcpStream>, path: &Path, cache: MutexArc<LruCache<~str, ~[u8]>>) {
         let mut stream = stream;
-        let mut file_reader = File::open(path).expect("Invalid file!");
-        stream.write(HTTP_OK.as_bytes());
-	let size: uint = WebServer::get_file_size(path);
+	stream.write(HTTP_OK.as_bytes());
+	let path_name: ~str = path.as_str().expect("Invalid file.").to_owned();
 	let mut read: uint = 0;
 	let blocksize: uint = 10240;
-	while blocksize < (size - read) {
-		stream.write(file_reader.read_bytes(blocksize));
-		read = read + blocksize;
-	}
-        stream.write(file_reader.read_to_end());
+	//let cache_copy: MutexArc<HashMap<~str, ~[u8]>> = cache.clone();
+	cache.access( |c_map| {
+		let mut buffer: ~[u8] = ~[];
+                match c_map.get(&path_name) {
+			Some(buff) => {
+				let size: uint = buff.len();
+				while blocksize < (size - read) {
+					let block = buff.slice(read, read + blocksize);
+					stream.write(block);
+					read = read + blocksize;
+				}
+        			stream.write(buff.slice(read, size));
+			}
+			None => {
+				let mut file_reader = File::open(path).expect("Invalid file!");
+				let size: uint = WebServer::get_file_size(path);
+				while blocksize < (size - read) {
+					let block = file_reader.read_bytes(blocksize);
+					stream.write(block);
+					read = read + blocksize;
+					buffer.push_all_move(block);
+				}
+				let block = file_reader.read_to_end();
+        			stream.write(block);
+				buffer.push_all_move(block);
+			}
+		}
+		if buffer.len() > 0 {
+			c_map.put(path_name.clone(), buffer);
+		}
+       	});
     }
 
     fn respond_with_dynamic_file(stream: Option<std::io::net::tcp::TcpStream>, path: &Path) {
@@ -284,6 +314,9 @@ impl WebServer {
         let req_queue_get = self.request_queue_arc.clone();
         let stream_map_get = self.stream_map_arc.clone();
         let task_count_get = self.task_count.clone();
+	let cache_map_get = self.cache_map_arc.clone();
+	//let mut local_cache: LruCache<~str, ~[u8]> = LruCache::new(4);
+	//let mut file_cache: ~[~[u8]] = ~[];
 
         // Port<> cannot be sent to another task. So we have to make this task as the main task that can access self.notify_port.
         
@@ -312,7 +345,6 @@ impl WebServer {
                     stream_chan.send(stream);
                 });
             }
-            
             // TODO: Spawning more tasks to respond the dequeued requests concurrently. You may need a semophore to control the concurrency.
 	    let mut temp = 0;
   	    task_count_get.read(|count| {temp = *count;});
@@ -320,11 +352,12 @@ impl WebServer {
             //WebServer::respond_with_static_file(stream, request.path);
 	    if (temp > 0) {
 		let task_count_2 = task_count_get.clone();
+		let cache_map_2 = cache_map_get.clone();
 		spawn(proc() {
 			//println!("{:?}", *count); <- put that in write statement below to see count value
 			task_count_2.write(|count| {*count -= 1;});
 			let stream = stream_port.recv();
-			WebServer::respond_with_static_file(stream, request.path);
+			WebServer::respond_with_static_file(stream, request.path, cache_map_2);
 			// Close stream automatically.
 		        debug!("=====Terminated connection from [{:s}].=====", request.peer_name);
 			task_count_2.write(|count| {*count += 1;});
