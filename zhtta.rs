@@ -23,6 +23,7 @@ use std::path::Path;
 use std::num::ToPrimitive;
 use std::hashmap::HashMap;
 use gash::*;
+use std::io::File;
 
 use extra::getopts;
 use extra::arc::MutexArc;
@@ -46,9 +47,7 @@ static COUNTER_STYLE : &'static str = "<doctype !html><html><head><title>Hello, 
                     h2 { font-size:2cm; text-align: center; color: black; text-shadow: 0 0 4mm green }
              </style></head>
              <body>";
-
-//static visitor_count: RWArc<int> = RWArc::new(0);            
-
+       
 struct HTTP_Request {
     // Use peer_name as the key to access TcpStream in hashmap. 
 
@@ -69,6 +68,8 @@ struct WebServer {
     stream_map_arc: MutexArc<HashMap<~str, Option<std::io::net::tcp::TcpStream>>>,
     cache_map_arc: MutexArc<LruCache<~str, ~[u8]>>,
     cache: LruCache<~str, ~[u8]>,
+	logfile_arc: MutexArc<File>,
+	logfile: File,
     
     notify_port: Port<()>,
     shared_notify_chan: SharedChan<()>,
@@ -79,6 +80,8 @@ impl WebServer {
         let (notify_port, shared_notify_chan) = SharedChan::new();
         let www_dir_path = ~Path::new(www_dir);
         os::change_dir(www_dir_path.clone());
+		//let mut f = File::create(&Path::new("log.txt"));
+		let p = Path::new("log.txt");
 	
         WebServer {
             ip: ip.to_owned(),
@@ -87,11 +90,20 @@ impl WebServer {
             request_queue_arc: MutexArc::new(~[]),
             stream_map_arc: MutexArc::new(HashMap::new()),
             visitor_count : RWArc::new(0),
-	    task_count : RWArc::new(16),
-	    cache_map_arc: MutexArc::new(LruCache::new(5)),
-	    cache: LruCache::new(5),
-            notify_port: notify_port,
-            shared_notify_chan: shared_notify_chan,        
+	    	task_count : RWArc::new(16),
+	    	cache_map_arc: MutexArc::new(LruCache::new(5)),
+	    	cache: LruCache::new(5),
+   	     	notify_port: notify_port,
+    	    shared_notify_chan: shared_notify_chan,
+			logfile_arc: MutexArc::new(match File::open_mode(&p, Open, ReadWrite) {
+				Some(s) => s,
+				None => fail!("")
+			}),    
+			logfile: match File::open_mode(&p, Open, ReadWrite) {
+				Some(s) => s,
+				None => fail!("")
+			},
+			//logfile: f.unwrap_or(~""),
         }
     }
     
@@ -102,26 +114,29 @@ impl WebServer {
     
     fn listen(&mut self) {
         let addr = from_str::<SocketAddr>(format!("{:s}:{:u}", self.ip, self.port)).expect("Address error.");
-        let www_dir_path_str = self.www_dir_path.as_str().expect("invalid www path?").to_owned();
-        
+        let www_dir_path_str = self.www_dir_path.as_str().expect("invalid www path?").to_owned();   
+		
         let request_queue_arc = self.request_queue_arc.clone();
         let shared_notify_chan = self.shared_notify_chan.clone();
         let stream_map_arc = self.stream_map_arc.clone();
-                
-        let vis_count = self.visitor_count.clone(); 
+		let logfile_arc = self.logfile_arc.clone();                
+        let vis_count = self.visitor_count.clone();
+
         spawn(proc() {
             let mut acceptor = net::tcp::TcpListener::bind(addr).listen();
             println!("{:s} listening on {:s} (serving from: {:s}).", 
                      SERVER_NAME, addr.to_str(), www_dir_path_str);
             
-            let vis_count = vis_count.clone(); 
+            let vis_count = vis_count.clone();
+			let logfile_arc = logfile_arc.clone();
             for stream in acceptor.incoming() {
                 let (queue_port, queue_chan) = Chan::new();
                 queue_chan.send(request_queue_arc.clone());
                 
                 let notify_chan = shared_notify_chan.clone();
                 let stream_map_arc = stream_map_arc.clone();
-               	let vis_count = vis_count.clone(); 
+               	let vis_count = vis_count.clone();
+				let logfile_arc = logfile_arc.clone();
                 // Spawn a task to handle the connection.
                 spawn(proc() {
                     vis_count.write(|current| {*current +=1;}); 
@@ -130,16 +145,17 @@ impl WebServer {
                     let mut stream = stream;
                     
                     let peer_name = WebServer::get_peer_name(&mut stream);
-                    
                     let mut buf = [0, ..500];
                     stream.read(buf);
                     let request_str = str::from_utf8(buf);
                     debug!("Request:\n{:s}", request_str);
                     
+
                     let req_group : ~[&str]= request_str.splitn(' ', 3).collect();
                     if req_group.len() > 2 {
                         let path_str = "." + req_group[1].to_owned();
-                        
+                        let tempstring = extra::time::now().ctime() + "      " + WebServer::get_peer_name(&mut stream) + "      " + req_group[1].to_owned() + "\n";
+					unsafe {logfile_arc.unsafe_access( |logfile| { logfile.write_str(tempstring); }); }
                         let mut path_obj = ~os::getcwd();
                         path_obj.push(path_str.clone());
                         
@@ -174,8 +190,8 @@ impl WebServer {
     }
 
     fn get_file_size(path: &Path) -> uint {
-	let st = path.stat();
-	st.size.to_uint().unwrap()
+		let st = path.stat();
+		st.size.to_uint().unwrap()
     }
 
     fn respond_with_error_page(stream: Option<std::io::net::tcp::TcpStream>, path: &Path) {
@@ -292,15 +308,15 @@ impl WebServer {
             debug!("Got queue mutex lock.");
             let req: HTTP_Request = req_port.recv();
             //look at IP address, if prioritized, then unshift, otherwise, push
-		let peer_vec = peer_name.split('.').to_owned_vec();
-		let first_two = peer_vec[0] + "." + peer_vec[1];
-		//println!("{:?}", WebServer::get_file_size(path_obj));
-		if (str::eq(&first_two, &~"128.143") || str::eq(&first_two, &~"137.54")) {
-			local_req_queue.unshift(req);
-		}
-		else {
-			local_req_queue.push(req);
-		}
+			let peer_vec = peer_name.split('.').to_owned_vec();
+			let first_two = peer_vec[0] + "." + peer_vec[1];
+			//println!("{:?}", WebServer::get_file_size(path_obj));
+			if (str::eq(&first_two, &~"128.143") || str::eq(&first_two, &~"137.54")) {
+				local_req_queue.unshift(req);
+			}
+			else {
+				local_req_queue.push(req);
+			}
             debug!("A new request enqueued, now the length of queue is {:u}.", local_req_queue.len());
         });
         
@@ -314,9 +330,9 @@ impl WebServer {
         let req_queue_get = self.request_queue_arc.clone();
         let stream_map_get = self.stream_map_arc.clone();
         let task_count_get = self.task_count.clone();
-	let cache_map_get = self.cache_map_arc.clone();
-	//let mut local_cache: LruCache<~str, ~[u8]> = LruCache::new(4);
-	//let mut file_cache: ~[~[u8]] = ~[];
+		let cache_map_get = self.cache_map_arc.clone();
+		//let mut local_cache: LruCache<~str, ~[u8]> = LruCache::new(4);
+		//let mut file_cache: ~[~[u8]] = ~[];
 
         // Port<> cannot be sent to another task. So we have to make this task as the main task that can access self.notify_port.
         
