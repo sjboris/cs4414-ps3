@@ -55,7 +55,9 @@ struct HTTP_Request {
     //  See issue: https://github.com/mozilla/rust/issues/12139)
     peer_name: ~str,
     path: ~Path,
+    file_size: uint,
 }
+
 
 struct WebServer {
     ip: ~str,
@@ -299,30 +301,42 @@ impl WebServer {
         }
         
         // Enqueue the HTTP request.
-        let req = HTTP_Request { peer_name: peer_name.clone(), path: ~path_obj.clone() };
+        let req = HTTP_Request { peer_name: peer_name.clone(), path: ~path_obj.clone(), file_size: WebServer::get_file_size(&path_obj.clone()) };
         let (req_port, req_chan) = Chan::new();
         req_chan.send(req);
 
         debug!("Waiting for queue mutex lock.");
         req_queue_arc.access(|local_req_queue| {
             debug!("Got queue mutex lock.");
-            let req: HTTP_Request = req_port.recv();
+            let mut req: HTTP_Request = req_port.recv();
             //look at IP address, if prioritized, then unshift, otherwise, push
 			let peer_vec = peer_name.split('.').to_owned_vec();
 			let first_two = peer_vec[0] + "." + peer_vec[1];
 			//println!("{:?}", WebServer::get_file_size(path_obj));
 			if (str::eq(&first_two, &~"128.143") || str::eq(&first_two, &~"137.54")) {
-				local_req_queue.unshift(req);
+				//local_req_queue.unshift(req);
 			}
 			else {
-				local_req_queue.push(req);
+				req = HTTP_Request {peer_name: req.peer_name.clone(), path: req.path.clone(), file_size: req.file_size.clone()*2};
+				//local_req_queue.push(req);
 			}
+			let pos = WebServer::find_index(local_req_queue, req.file_size.clone());
+			local_req_queue.insert(pos, req);
             debug!("A new request enqueued, now the length of queue is {:u}.", local_req_queue.len());
         });
         
         notify_chan.send(()); // Send incoming notification to responder task.
     
     
+    }
+
+    fn find_index(vec: &mut ~[HTTP_Request], fsize: uint) -> uint {
+	for x in range(0, vec.len()) {
+		if(vec[x].file_size > fsize) {
+			return x;
+		}
+	}
+	return 0;
     }
     
     // TODO: Smarter Scheduling.
