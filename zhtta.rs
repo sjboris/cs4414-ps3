@@ -121,7 +121,8 @@ impl WebServer {
         let request_queue_arc = self.request_queue_arc.clone();
         let shared_notify_chan = self.shared_notify_chan.clone();
         let stream_map_arc = self.stream_map_arc.clone();
-		let logfile_arc = self.logfile_arc.clone();                
+		let logfile_arc = self.logfile_arc.clone();
+	let cache_map_arc_copy = self.cache_map_arc.clone();                
         let vis_count = self.visitor_count.clone();
 
         spawn(proc() {
@@ -139,10 +140,12 @@ impl WebServer {
                 let stream_map_arc = stream_map_arc.clone();
                	let vis_count = vis_count.clone();
 				let logfile_arc = logfile_arc.clone();
+		let cache_map_arc_copy = cache_map_arc_copy.clone();
                 // Spawn a task to handle the connection.
                 spawn(proc() {
                     vis_count.write(|current| {*current +=1;}); 
                     let request_queue_arc = queue_port.recv();
+		    let cache_map_arc_copy = cache_map_arc_copy.clone();
                   
                     let mut stream = stream;
                     
@@ -183,7 +186,13 @@ impl WebServer {
                             debug!("=====Terminated connection from [{:s}].=====", peer_name);
                         } else { 
                             debug!("===== Static Page request =====");
-                            WebServer::enqueue_static_file_request(stream, path_obj, stream_map_arc, request_queue_arc, notify_chan);
+                            if WebServer::get_file_size(path_obj) <= 512 {
+				let cache_map_arc_copy2 = cache_map_arc_copy.clone();
+				WebServer::respond_with_static_file(stream, path_obj, cache_map_arc_copy2);
+			    }
+			    else {
+				WebServer::enqueue_static_file_request(stream, path_obj, stream_map_arc, request_queue_arc, notify_chan);
+			    }
                         }
                     }
                 });
@@ -313,10 +322,8 @@ impl WebServer {
 			let peer_vec = peer_name.split('.').to_owned_vec();
 			let first_two = peer_vec[0] + "." + peer_vec[1];
 			//println!("{:?}", WebServer::get_file_size(path_obj));
-			if (str::eq(&first_two, &~"128.143") || str::eq(&first_two, &~"137.54")) {
+			if !(str::eq(&first_two, &~"128.143") || str::eq(&first_two, &~"137.54")) {
 				//local_req_queue.unshift(req);
-			}
-			else {
 				req = HTTP_Request {peer_name: req.peer_name.clone(), path: req.path.clone(), file_size: req.file_size.clone()*2};
 				//local_req_queue.push(req);
 			}
@@ -331,12 +338,18 @@ impl WebServer {
     }
 
     fn find_index(vec: &mut ~[HTTP_Request], fsize: uint) -> uint {
-	for x in range(0, vec.len()) {
-		if(vec[x].file_size > fsize) {
-			return x;
-		}
+	let length: uint = vec.len();
+	if length == 0 {
+		return 0;
 	}
-	return 0;
+	else {
+		for x in range(0, length) {
+			if(vec[x].file_size >= fsize) {
+				return x;
+			}
+		}
+		return length;
+	}
     }
     
     // TODO: Smarter Scheduling.
