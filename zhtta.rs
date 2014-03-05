@@ -64,12 +64,11 @@ struct WebServer {
     port: uint,
     www_dir_path: ~Path,
     
-    visitor_count : RWArc<int>,// = RWArc::new(0),
+    visitor_count : RWArc<int>,
     task_count : RWArc<int>,
     request_queue_arc: MutexArc<~[HTTP_Request]>,
     stream_map_arc: MutexArc<HashMap<~str, Option<std::io::net::tcp::TcpStream>>>,
     cache_map_arc: MutexArc<LruCache<~str, ~[u8]>>,
-    cache: LruCache<~str, ~[u8]>,
 	logfile_arc: MutexArc<File>,
 	logfile: File,
     
@@ -92,16 +91,15 @@ impl WebServer {
             request_queue_arc: MutexArc::new(~[]),
             stream_map_arc: MutexArc::new(HashMap::new()),
             visitor_count : RWArc::new(0),
-	    	task_count : RWArc::new(16),
-	    	cache_map_arc: MutexArc::new(LruCache::new(5)),
-	    	cache: LruCache::new(5),
+	    	task_count : RWArc::new(128),
+	    	cache_map_arc: MutexArc::new(LruCache::new(6)),
    	     	notify_port: notify_port,
     	    shared_notify_chan: shared_notify_chan,
 			logfile_arc: MutexArc::new(match File::open_mode(&p, Open, ReadWrite) {
 				Some(s) => s,
 				None => fail!("")
 			}),    
-			logfile: match File::open_mode(&p, Open, ReadWrite) {
+			logfile: match File::create(&p) {
 				Some(s) => s,
 				None => fail!("")
 			},
@@ -160,7 +158,7 @@ impl WebServer {
                     if req_group.len() > 2 {
                         let path_str = "." + req_group[1].to_owned();
                         let tempstring = extra::time::now().ctime() + "      " + WebServer::get_peer_name(&mut stream) + "      " + req_group[1].to_owned() + "\n";
-					unsafe {logfile_arc.unsafe_access( |logfile| { logfile.write_str(tempstring); }); }
+			unsafe {logfile_arc.unsafe_access( |logfile| { logfile.write_str(tempstring); }); }
                         let mut path_obj = ~os::getcwd();
                         path_obj.push(path_str.clone());
                         
@@ -235,7 +233,6 @@ impl WebServer {
 	let path_name: ~str = path.as_str().expect("Invalid file.").to_owned();
 	let mut read: uint = 0;
 	let blocksize: uint = 10240;
-	//let cache_copy: MutexArc<HashMap<~str, ~[u8]>> = cache.clone();
 	cache.access( |c_map| {
 		let mut buffer: ~[u8] = ~[];
                 match c_map.get(&path_name) {
@@ -318,14 +315,11 @@ impl WebServer {
         req_queue_arc.access(|local_req_queue| {
             debug!("Got queue mutex lock.");
             let mut req: HTTP_Request = req_port.recv();
-            //look at IP address, if prioritized, then unshift, otherwise, push
 			let peer_vec = peer_name.split('.').to_owned_vec();
 			let first_two = peer_vec[0] + "." + peer_vec[1];
 			//println!("{:?}", WebServer::get_file_size(path_obj));
 			if !(str::eq(&first_two, &~"128.143") || str::eq(&first_two, &~"137.54")) {
-				//local_req_queue.unshift(req);
 				req = HTTP_Request {peer_name: req.peer_name.clone(), path: req.path.clone(), file_size: req.file_size.clone()*2};
-				//local_req_queue.push(req);
 			}
 			let pos = WebServer::find_index(local_req_queue, req.file_size.clone());
 			local_req_queue.insert(pos, req);
@@ -357,9 +351,7 @@ impl WebServer {
         let req_queue_get = self.request_queue_arc.clone();
         let stream_map_get = self.stream_map_arc.clone();
         let task_count_get = self.task_count.clone();
-		let cache_map_get = self.cache_map_arc.clone();
-		//let mut local_cache: LruCache<~str, ~[u8]> = LruCache::new(4);
-		//let mut file_cache: ~[~[u8]] = ~[];
+	let cache_map_get = self.cache_map_arc.clone();
 
         // Port<> cannot be sent to another task. So we have to make this task as the main task that can access self.notify_port.
         
@@ -382,22 +374,20 @@ impl WebServer {
             // Get stream from hashmap.
             // Use unsafe method, because TcpStream in Rust 0.9 doesn't have "Freeze" bound.
             let (stream_port, stream_chan) = Chan::new();
-            unsafe {
-                stream_map_get.unsafe_access(|local_stream_map| {
-                    let stream = local_stream_map.pop(&request.peer_name).expect("no option tcpstream");
-                    stream_chan.send(stream);
-                });
+          	unsafe {
+                	stream_map_get.unsafe_access(|local_stream_map| {
+                 	let stream = local_stream_map.pop(&request.peer_name).expect("no stream");
+                  	stream_chan.send(stream);
+       		});
             }
+
             // TODO: Spawning more tasks to respond the dequeued requests concurrently. You may need a semophore to control the concurrency.
 	    let mut temp = 0;
   	    task_count_get.read(|count| {temp = *count;});
-            //let stream = stream_port.recv();
-            //WebServer::respond_with_static_file(stream, request.path);
 	    if (temp > 0) {
 		let task_count_2 = task_count_get.clone();
 		let cache_map_2 = cache_map_get.clone();
 		spawn(proc() {
-			//println!("{:?}", *count); <- put that in write statement below to see count value
 			task_count_2.write(|count| {*count -= 1;});
 			let stream = stream_port.recv();
 			WebServer::respond_with_static_file(stream, request.path, cache_map_2);
